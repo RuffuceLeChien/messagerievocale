@@ -1,23 +1,144 @@
 import streamlit as st
+from audio_recorder_streamlit import audio_recorder
 import os
 from datetime import datetime
-import json
+import base64
+import sqlite3
+from pathlib import Path
+import hashlib
 
 # Configuration de la page
 st.set_page_config(page_title="Messagerie Vocale", page_icon="🎤", layout="wide")
+
+# Chemin de la base de données
+DB_PATH = "/mount/data/messagerie_vocale.db"
+
+# Code administrateur
+ADMIN_CODE = "ruffucelechien"
+
+# Initialisation de la base de données
+def init_database():
+    """Initialise la base de données SQLite avec les tables nécessaires"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Table des codes utilisateurs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Table des messages vocaux
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author TEXT NOT NULL,
+            audio_data TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# Fonctions de gestion des codes utilisateurs
+def get_all_user_codes():
+    """Récupère tous les codes utilisateurs"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT code FROM user_codes ORDER BY created_at DESC")
+    codes = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return codes
+
+def add_user_code(code):
+    """Ajoute un nouveau code utilisateur"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO user_codes (code) VALUES (?)", (code,))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+def delete_user_code(code):
+    """Supprime un code utilisateur"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM user_codes WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()
+
+# Fonctions de gestion des messages
+def get_all_messages():
+    """Récupère tous les messages"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, author, audio_data, created_at 
+        FROM messages 
+        ORDER BY created_at DESC
+    """)
+    messages = []
+    for row in cursor.fetchall():
+        messages.append({
+            "id": row[0],
+            "author": row[1],
+            "audio": row[2],
+            "timestamp": row[3]
+        })
+    conn.close()
+    return messages
+
+def add_message(author, audio_base64):
+    """Ajoute un nouveau message"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO messages (author, audio_data) 
+        VALUES (?, ?)
+    """, (author, audio_base64))
+    conn.commit()
+    conn.close()
+
+def delete_message(message_id):
+    """Supprime un message"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+
+def delete_all_messages():
+    """Supprime tous les messages"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM messages")
+    conn.commit()
+    conn.close()
+
+def get_message_count():
+    """Compte le nombre total de messages"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM messages")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+# Initialiser la base de données au démarrage
+init_database()
 
 # Initialisation des variables de session
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'user_type' not in st.session_state:
     st.session_state.user_type = None
-if 'user_codes' not in st.session_state:
-    st.session_state.user_codes = []
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-
-# Code administrateur
-ADMIN_CODE = "ruffucelechien"
 
 # Fonction de connexion
 def login(code):
@@ -25,7 +146,7 @@ def login(code):
         st.session_state.authenticated = True
         st.session_state.user_type = "admin"
         return True
-    elif code in st.session_state.user_codes:
+    elif code in get_all_user_codes():
         st.session_state.authenticated = True
         st.session_state.user_type = "user"
         return True
@@ -35,6 +156,20 @@ def login(code):
 def logout():
     st.session_state.authenticated = False
     st.session_state.user_type = None
+
+# Fonction pour convertir audio en base64
+def audio_to_base64(audio_bytes):
+    return base64.b64encode(audio_bytes).decode()
+
+# Fonction pour afficher le lecteur audio
+def display_audio_player(audio_base64):
+    audio_html = f"""
+    <audio controls style="width: 100%;">
+        <source src="data:audio/wav;base64,{audio_base64}" type="audio/wav">
+        Votre navigateur ne supporte pas l'élément audio.
+    </audio>
+    """
+    return audio_html
 
 # Interface de connexion
 if not st.session_state.authenticated:
@@ -73,24 +208,32 @@ else:
         with st.expander("⚙️ Gestion des codes utilisateurs"):
             st.subheader("Codes autorisés")
             
-            new_code = st.text_input("Ajouter un nouveau code", key="new_code")
-            if st.button("Ajouter le code"):
-                if new_code and new_code not in st.session_state.user_codes:
-                    st.session_state.user_codes.append(new_code)
-                    st.success(f"Code '{new_code}' ajouté avec succès")
-                    st.rerun()
-                elif new_code in st.session_state.user_codes:
-                    st.warning("Ce code existe déjà")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                new_code = st.text_input("Ajouter un nouveau code", key="new_code")
+            with col2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("➕ Ajouter", use_container_width=True):
+                    if new_code:
+                        if add_user_code(new_code):
+                            st.success(f"Code '{new_code}' ajouté avec succès ✅")
+                            st.rerun()
+                        else:
+                            st.warning("Ce code existe déjà")
+                    else:
+                        st.error("Veuillez entrer un code")
             
-            if st.session_state.user_codes:
+            user_codes = get_all_user_codes()
+            if user_codes:
                 st.write("**Liste des codes actifs:**")
-                for idx, code in enumerate(st.session_state.user_codes):
+                for idx, code in enumerate(user_codes):
                     col1, col2 = st.columns([3, 1])
                     with col1:
                         st.text(f"🔑 {code}")
                     with col2:
-                        if st.button("Supprimer", key=f"del_code_{idx}"):
-                            st.session_state.user_codes.remove(code)
+                        if st.button("🗑️", key=f"del_code_{idx}", help="Supprimer"):
+                            delete_user_code(code)
+                            st.success("Code supprimé ✅")
                             st.rerun()
             else:
                 st.info("Aucun code utilisateur configuré")
@@ -98,43 +241,44 @@ else:
         st.markdown("---")
     
     # Section d'enregistrement
-    st.subheader("📝 Enregistrer un message")
+    st.subheader("📝 Enregistrer un message vocal")
     
-    col1, col2 = st.columns([2, 1])
+    col1, col2 = st.columns([3, 1])
+    
     with col1:
-        message_text = st.text_area(
-            "Contenu du message (simulé - audio à implémenter avec audio-recorder-streamlit)",
-            height=100,
-            placeholder="Maintenez le bouton micro pour enregistrer votre message vocal..."
+        st.markdown("**Maintenez le bouton pour enregistrer :**")
+        audio_bytes = audio_recorder(
+            text="Cliquez et maintenez pour enregistrer",
+            recording_color="#e74c3c",
+            neutral_color="#3498db",
+            icon_name="microphone",
+            icon_size="3x",
+            pause_threshold=2.0
         )
     
     with col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🎤 Enregistrer", type="primary", use_container_width=True):
-            if message_text:
-                new_message = {
-                    "id": len(st.session_state.messages),
-                    "author": st.session_state.user_type,
-                    "content": message_text,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                st.session_state.messages.append(new_message)
-                st.success("Message enregistré!")
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        if st.button("💾 Sauvegarder", type="primary", use_container_width=True, disabled=not audio_bytes):
+            if audio_bytes:
+                audio_base64 = audio_to_base64(audio_bytes)
+                add_message(st.session_state.user_type, audio_base64)
+                st.success("Message vocal enregistré et sauvegardé! ✅")
                 st.rerun()
-            else:
-                st.warning("Veuillez saisir un message")
     
-    st.info("💡 **Note**: Pour un vrai enregistrement audio, installez: `pip install audio-recorder-streamlit`")
+    if audio_bytes:
+        st.info("✅ Message vocal prêt à être sauvegardé")
     
     st.markdown("---")
     
     # Liste des messages
     st.subheader("📬 Messages vocaux")
     
-    if st.session_state.messages:
-        for msg in reversed(st.session_state.messages):
+    messages = get_all_messages()
+    
+    if messages:
+        for msg in messages:
             with st.container():
-                col1, col2, col3 = st.columns([2, 3, 1])
+                col1, col2, col3 = st.columns([2, 4, 1])
                 
                 with col1:
                     author_icon = "👑" if msg["author"] == "admin" else "👤"
@@ -142,16 +286,35 @@ else:
                     st.caption(msg["timestamp"])
                 
                 with col2:
-                    st.text(msg["content"])
+                    st.markdown(display_audio_player(msg["audio"]), unsafe_allow_html=True)
                 
                 with col3:
-                    if st.button("🗑️ Supprimer", key=f"del_msg_{msg['id']}"):
-                        st.session_state.messages = [m for m in st.session_state.messages if m['id'] != msg['id']]
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"del_msg_{msg['id']}", help="Supprimer"):
+                        delete_message(msg['id'])
+                        st.success("Message supprimé ✅")
                         st.rerun()
                 
                 st.markdown("---")
     else:
         st.info("Aucun message enregistré pour le moment")
+    
+    # Statistiques dans la sidebar
+    st.sidebar.metric("📊 Messages totaux", get_message_count())
+    if st.session_state.user_type == "admin":
+        st.sidebar.metric("👥 Codes utilisateurs", len(get_all_user_codes()))
+        
+        # Option pour effacer toutes les données (Admin uniquement)
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("⚠️ Zone dangereuse")
+        
+        with st.sidebar.expander("🗑️ Supprimer tous les messages"):
+            st.warning("Cette action est irréversible!")
+            confirm = st.checkbox("Je confirme vouloir supprimer tous les messages")
+            if st.button("Supprimer définitivement", type="secondary", disabled=not confirm):
+                delete_all_messages()
+                st.success("Tous les messages ont été supprimés")
+                st.rerun()
 
 # CSS personnalisé
 st.markdown("""
@@ -163,6 +326,9 @@ st.markdown("""
         background-color: #f0f2f6;
         border-radius: 10px;
         padding: 10px;
+    }
+    audio {
+        margin: 5px 0;
     }
 </style>
 """, unsafe_allow_html=True)
