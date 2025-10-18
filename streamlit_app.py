@@ -3,142 +3,122 @@ from audio_recorder_streamlit import audio_recorder
 import os
 from datetime import datetime
 import base64
-import sqlite3
-from pathlib import Path
-import hashlib
+import json
+import requests
 
 # Configuration de la page
 st.set_page_config(page_title="Messagerie Vocale", page_icon="🎤", layout="wide")
 
-# Chemin de la base de données
-DB_PATH = "/mount/data/messagerie_vocale.db"
-
 # Code administrateur
 ADMIN_CODE = "ruffucelechien"
 
-# Initialisation de la base de données
-def init_database():
-    """Initialise la base de données SQLite avec les tables nécessaires"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # Table des codes utilisateurs
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_codes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Table des messages vocaux
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            author TEXT NOT NULL,
-            audio_data TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+# Configuration du stockage avec GitHub Gist
+# Créer un Gist sur github.com/gists avec un fichier "data.json" contenant: {"codes": [], "messages": []}
+# Puis mettre l'URL raw et le token dans Streamlit Secrets
 
-# Fonctions de gestion des codes utilisateurs
-def get_all_user_codes():
-    """Récupère tous les codes utilisateurs"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT code FROM user_codes ORDER BY created_at DESC")
-    codes = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return codes
-
-def add_user_code(code):
-    """Ajoute un nouveau code utilisateur"""
+def get_gist_config():
+    """Récupère la configuration du Gist depuis les secrets Streamlit"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO user_codes (code) VALUES (?)", (code,))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
+        return {
+            "url": st.secrets["gist"]["url"],
+            "token": st.secrets["gist"]["token"]
+        }
+    except:
+        # Configuration par défaut pour les tests locaux
+        return None
+
+def load_data_from_gist():
+    """Charge les données depuis GitHub Gist"""
+    config = get_gist_config()
+    if not config:
+        # Mode local sans persistance
+        return {"codes": [], "messages": []}
+    
+    try:
+        headers = {"Authorization": f"token {config['token']}"} if config['token'] else {}
+        response = requests.get(config['url'], headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
+    return {"codes": [], "messages": []}
+
+def save_data_to_gist(data):
+    """Sauvegarde les données sur GitHub Gist"""
+    config = get_gist_config()
+    if not config:
         return False
-
-def delete_user_code(code):
-    """Supprime un code utilisateur"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM user_codes WHERE code = ?", (code,))
-    conn.commit()
-    conn.close()
-
-# Fonctions de gestion des messages
-def get_all_messages():
-    """Récupère tous les messages"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, author, audio_data, created_at 
-        FROM messages 
-        ORDER BY created_at DESC
-    """)
-    messages = []
-    for row in cursor.fetchall():
-        messages.append({
-            "id": row[0],
-            "author": row[1],
-            "audio": row[2],
-            "timestamp": row[3]
-        })
-    conn.close()
-    return messages
-
-def add_message(author, audio_base64):
-    """Ajoute un nouveau message"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO messages (author, audio_data) 
-        VALUES (?, ?)
-    """, (author, audio_base64))
-    conn.commit()
-    conn.close()
-
-def delete_message(message_id):
-    """Supprime un message"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
-    conn.commit()
-    conn.close()
-
-def delete_all_messages():
-    """Supprime tous les messages"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM messages")
-    conn.commit()
-    conn.close()
-
-def get_message_count():
-    """Compte le nombre total de messages"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM messages")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
-
-# Initialiser la base de données au démarrage
-init_database()
+    
+    try:
+        # Extraire l'ID du Gist depuis l'URL
+        gist_id = config['url'].split('/')[-2]
+        api_url = f"https://api.github.com/gists/{gist_id}"
+        
+        headers = {
+            "Authorization": f"token {config['token']}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        payload = {
+            "files": {
+                "data.json": {
+                    "content": json.dumps(data, indent=2)
+                }
+            }
+        }
+        
+        response = requests.patch(api_url, headers=headers, json=payload, timeout=10)
+        return response.status_code == 200
+    except:
+        return False
 
 # Initialisation des variables de session
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'user_type' not in st.session_state:
     st.session_state.user_type = None
+if 'data' not in st.session_state:
+    st.session_state.data = load_data_from_gist()
+
+# Fonctions de gestion des données
+def get_user_codes():
+    return st.session_state.data.get("codes", [])
+
+def add_user_code(code):
+    if code not in st.session_state.data["codes"]:
+        st.session_state.data["codes"].append(code)
+        save_data_to_gist(st.session_state.data)
+        return True
+    return False
+
+def delete_user_code(code):
+    if code in st.session_state.data["codes"]:
+        st.session_state.data["codes"].remove(code)
+        save_data_to_gist(st.session_state.data)
+
+def get_messages():
+    return st.session_state.data.get("messages", [])
+
+def add_message(author, audio_base64):
+    message = {
+        "id": int(datetime.now().timestamp() * 1000),
+        "author": author,
+        "audio": audio_base64,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    st.session_state.data["messages"].append(message)
+    save_data_to_gist(st.session_state.data)
+
+def delete_message(message_id):
+    st.session_state.data["messages"] = [
+        m for m in st.session_state.data["messages"] 
+        if m["id"] != message_id
+    ]
+    save_data_to_gist(st.session_state.data)
+
+def delete_all_messages():
+    st.session_state.data["messages"] = []
+    save_data_to_gist(st.session_state.data)
 
 # Fonction de connexion
 def login(code):
@@ -146,7 +126,7 @@ def login(code):
         st.session_state.authenticated = True
         st.session_state.user_type = "admin"
         return True
-    elif code in get_all_user_codes():
+    elif code in get_user_codes():
         st.session_state.authenticated = True
         st.session_state.user_type = "user"
         return True
@@ -223,7 +203,7 @@ else:
                     else:
                         st.error("Veuillez entrer un code")
             
-            user_codes = get_all_user_codes()
+            user_codes = get_user_codes()
             if user_codes:
                 st.write("**Liste des codes actifs:**")
                 for idx, code in enumerate(user_codes):
@@ -273,7 +253,7 @@ else:
     # Liste des messages
     st.subheader("📬 Messages vocaux")
     
-    messages = get_all_messages()
+    messages = sorted(get_messages(), key=lambda x: x['timestamp'], reverse=True)
     
     if messages:
         for msg in messages:
@@ -300,9 +280,9 @@ else:
         st.info("Aucun message enregistré pour le moment")
     
     # Statistiques dans la sidebar
-    st.sidebar.metric("📊 Messages totaux", get_message_count())
+    st.sidebar.metric("📊 Messages totaux", len(get_messages()))
     if st.session_state.user_type == "admin":
-        st.sidebar.metric("👥 Codes utilisateurs", len(get_all_user_codes()))
+        st.sidebar.metric("👥 Codes utilisateurs", len(get_user_codes()))
         
         # Option pour effacer toutes les données (Admin uniquement)
         st.sidebar.markdown("---")
