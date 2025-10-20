@@ -12,64 +12,86 @@ st.set_page_config(page_title="Messagerie Vocale", page_icon="🎤", layout="wid
 # Code administrateur
 ADMIN_CODE = "ruffucelechien"
 
-# Configuration du stockage avec GitHub Gist
-# Créer un Gist sur github.com/gists avec un fichier "data.json" contenant: {"codes": [], "messages": []}
-# Puis mettre l'URL raw et le token dans Streamlit Secrets
-
-def get_gist_config():
-    """Récupère la configuration du Gist depuis les secrets Streamlit"""
+# Configuration GitHub depuis Streamlit Secrets
+def get_github_config():
+    """Récupère la configuration GitHub depuis les secrets Streamlit"""
     try:
         return {
-            "url": st.secrets["gist"]["url"],
-            "token": st.secrets["gist"]["token"]
+            "token": st.secrets["GITHUB_TOKEN"],
+            "repo": st.secrets["GITHUB_REPO"],
+            "branch": st.secrets.get("GITHUB_BRANCH", "main")
         }
     except:
-        # Configuration par défaut pour les tests locaux
         return None
 
-def load_data_from_gist():
-    """Charge les données depuis GitHub Gist"""
-    config = get_gist_config()
+def load_data_from_github():
+    """Charge les données depuis GitHub"""
+    config = get_github_config()
     if not config:
-        # Mode local sans persistance
         return {"codes": [], "messages": []}
     
     try:
-        headers = {"Authorization": f"token {config['token']}"} if config['token'] else {}
-        response = requests.get(config['url'], headers=headers, timeout=10)
+        url = f"https://api.github.com/repos/{config['repo']}/contents/data.json"
+        headers = {
+            "Authorization": f"token {config['token']}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        params = {"ref": config['branch']}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
         if response.status_code == 200:
-            return response.json()
-    except:
-        pass
+            content = response.json()
+            # Décoder le contenu base64
+            data_json = base64.b64decode(content['content']).decode('utf-8')
+            return json.loads(data_json)
+        elif response.status_code == 404:
+            # Le fichier n'existe pas encore, on le crée
+            initial_data = {"codes": [], "messages": []}
+            save_data_to_github(initial_data)
+            return initial_data
+    except Exception as e:
+        st.error(f"Erreur de chargement: {str(e)}")
+    
     return {"codes": [], "messages": []}
 
-def save_data_to_gist(data):
-    """Sauvegarde les données sur GitHub Gist"""
-    config = get_gist_config()
+def save_data_to_github(data):
+    """Sauvegarde les données sur GitHub"""
+    config = get_github_config()
     if not config:
         return False
     
     try:
-        # Extraire l'ID du Gist depuis l'URL
-        gist_id = config['url'].split('/')[-2]
-        api_url = f"https://api.github.com/gists/{gist_id}"
-        
+        url = f"https://api.github.com/repos/{config['repo']}/contents/data.json"
         headers = {
             "Authorization": f"token {config['token']}",
             "Accept": "application/vnd.github.v3+json"
         }
         
+        # Vérifier si le fichier existe pour obtenir le SHA
+        response = requests.get(url, headers=headers, params={"ref": config['branch']}, timeout=10)
+        sha = None
+        if response.status_code == 200:
+            sha = response.json()['sha']
+        
+        # Préparer le contenu
+        content_json = json.dumps(data, indent=2, ensure_ascii=False)
+        content_base64 = base64.b64encode(content_json.encode('utf-8')).decode('utf-8')
+        
+        # Créer ou mettre à jour le fichier
         payload = {
-            "files": {
-                "data.json": {
-                    "content": json.dumps(data, indent=2)
-                }
-            }
+            "message": f"Update data - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "content": content_base64,
+            "branch": config['branch']
         }
         
-        response = requests.patch(api_url, headers=headers, json=payload, timeout=10)
-        return response.status_code == 200
-    except:
+        if sha:
+            payload['sha'] = sha
+        
+        response = requests.put(url, headers=headers, json=payload, timeout=10)
+        return response.status_code in [200, 201]
+    except Exception as e:
+        st.error(f"Erreur de sauvegarde: {str(e)}")
         return False
 
 # Initialisation des variables de session
@@ -78,7 +100,9 @@ if 'authenticated' not in st.session_state:
 if 'user_type' not in st.session_state:
     st.session_state.user_type = None
 if 'data' not in st.session_state:
-    st.session_state.data = load_data_from_gist()
+    st.session_state.data = load_data_from_github()
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = True
 
 # Fonctions de gestion des données
 def get_user_codes():
@@ -87,14 +111,13 @@ def get_user_codes():
 def add_user_code(code):
     if code not in st.session_state.data["codes"]:
         st.session_state.data["codes"].append(code)
-        save_data_to_gist(st.session_state.data)
-        return True
+        return save_data_to_github(st.session_state.data)
     return False
 
 def delete_user_code(code):
     if code in st.session_state.data["codes"]:
         st.session_state.data["codes"].remove(code)
-        save_data_to_gist(st.session_state.data)
+        save_data_to_github(st.session_state.data)
 
 def get_messages():
     return st.session_state.data.get("messages", [])
@@ -107,18 +130,22 @@ def add_message(author, audio_base64):
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     st.session_state.data["messages"].append(message)
-    save_data_to_gist(st.session_state.data)
+    save_data_to_github(st.session_state.data)
 
 def delete_message(message_id):
     st.session_state.data["messages"] = [
         m for m in st.session_state.data["messages"] 
         if m["id"] != message_id
     ]
-    save_data_to_gist(st.session_state.data)
+    save_data_to_github(st.session_state.data)
 
 def delete_all_messages():
     st.session_state.data["messages"] = []
-    save_data_to_gist(st.session_state.data)
+    save_data_to_github(st.session_state.data)
+
+def reload_data():
+    """Recharge les données depuis GitHub"""
+    st.session_state.data = load_data_from_github()
 
 # Fonction de connexion
 def login(code):
@@ -171,12 +198,19 @@ if not st.session_state.authenticated:
 # Interface principale (après connexion)
 else:
     # En-tête
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         st.title("🎤 Messagerie Vocale")
         user_badge = "👑 Administrateur" if st.session_state.user_type == "admin" else "👤 Utilisateur"
         st.markdown(f"**{user_badge}**")
     with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Actualiser", help="Recharger les données depuis GitHub"):
+            reload_data()
+            st.success("Données actualisées ✅")
+            st.rerun()
+    with col3:
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Déconnexion", type="secondary"):
             logout()
             st.rerun()
@@ -199,7 +233,7 @@ else:
                             st.success(f"Code '{new_code}' ajouté avec succès ✅")
                             st.rerun()
                         else:
-                            st.warning("Ce code existe déjà")
+                            st.warning("Ce code existe déjà ou erreur de sauvegarde")
                     else:
                         st.error("Veuillez entrer un code")
             
